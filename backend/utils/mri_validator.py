@@ -19,13 +19,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import cv2
 import numpy as np
-import torch
 from fastapi import HTTPException, UploadFile
 from PIL import Image, UnidentifiedImageError
-from torch import nn
-from torchvision import models, transforms
 
 
 logger = logging.getLogger("ann_backend")
@@ -57,8 +53,6 @@ GRAYSCALE_CHANNEL_STD_MAX = 5.0  # Allow medical scanner variations
 VALIDATOR_CONFIDENCE_THRESHOLD = 0.70
 VALIDATOR_CLASS_NAMES = ("brain_mri", "non_mri")
 DEFAULT_VALIDATOR_ARCHITECTURE = "resnet18"
-IMAGENET_MEAN = [0.485, 0.456, 0.406]
-IMAGENET_STD = [0.229, 0.224, 0.225]
 
 _RESAMPLING = getattr(Image, "Resampling", Image)
 
@@ -96,7 +90,7 @@ class MRIHardGateMetrics:
 # Legacy data classes
 @dataclass(frozen=True)
 class MRIValidatorArtifacts:
-    model: nn.Module
+    model: Any
     transform: Any
     class_names: tuple[str, str]
 
@@ -148,6 +142,15 @@ def _compute_colorfulness(rgb_array: np.ndarray) -> float:
     std_root = float(np.sqrt(np.std(rg_channel) ** 2 + np.std(yb_channel) ** 2))
     mean_root = float(np.sqrt(np.mean(rg_channel) ** 2 + np.mean(yb_channel) ** 2))
     return std_root + (0.3 * mean_root)
+
+
+def _edge_density_from_gray(gray_array: np.ndarray) -> float:
+    """Compute lightweight edge density using NumPy gradients."""
+    normalized = gray_array.astype(np.float32) / 255.0
+    grad_y, grad_x = np.gradient(normalized)
+    magnitude = np.sqrt((grad_x * grad_x) + (grad_y * grad_y))
+    edge_mask = magnitude > 0.08
+    return float(np.count_nonzero(edge_mask)) / float(edge_mask.size)
 
 
 def _is_strict_grayscale(image: Image.Image) -> tuple[bool, float]:
@@ -391,9 +394,7 @@ def optional_edge_check(image: Image.Image) -> float:
     """Legacy wrapper - computes edge density for diagnostics."""
     gray_image = image.convert("L").resize((IMAGE_SIZE, IMAGE_SIZE), _RESAMPLING.BILINEAR)
     gray_array = np.asarray(gray_image, dtype=np.uint8)
-    blurred = cv2.GaussianBlur(gray_array, (5, 5), 0)
-    edges = cv2.Canny(blurred, 40, 120)
-    return float(np.count_nonzero(edges)) / float(edges.size)
+    return _edge_density_from_gray(gray_array)
 
 
 def fallback_validate_brain_mri(image: Image.Image) -> MRIValidatorResult:
@@ -430,9 +431,7 @@ def compute_heuristic_metrics(image: Image.Image) -> MRIHeuristicMetrics:
     mean_rg_yb = np.sqrt(np.mean(rg) ** 2 + np.mean(yb) ** 2)
     colorfulness = float(std_rg_yb + 0.3 * mean_rg_yb)
     
-    blurred = cv2.GaussianBlur(gray_array.astype(np.uint8), (5, 5), 0)
-    edges = cv2.Canny(blurred, 40, 120)
-    edge_density = float(np.count_nonzero(edges)) / float(edges.size)
+    edge_density = _edge_density_from_gray(gray_array.astype(np.uint8))
     
     h, w = gray_array.shape
     left_half = gray_array[:, :w // 2]
@@ -458,24 +457,14 @@ def compute_heuristic_metrics(image: Image.Image) -> MRIHeuristicMetrics:
     )
 
 
-def build_validator_model(architecture: str = DEFAULT_VALIDATOR_ARCHITECTURE) -> nn.Module:
+def build_validator_model(architecture: str = DEFAULT_VALIDATOR_ARCHITECTURE) -> Any:
     """Legacy stub - no longer used."""
-    if architecture.strip().lower() == "resnet18":
-        model = models.resnet18(weights=None)
-        model.fc = nn.Linear(model.fc.in_features, 2)
-        return model
-
-    if architecture.strip().lower() == "mobilenet_v3_small":
-        model = models.mobilenet_v3_small(weights=None)
-        model.classifier[-1] = nn.Linear(model.classifier[-1].in_features, 2)
-        return model
-
-    raise RuntimeError(f"Unsupported architecture '{architecture}'")
+    raise NotImplementedError("Legacy validator model building is deprecated")
 
 
 def load_validator_model(
     model_path: Path,
-    device: torch.device,
+    device: Any,
 ) -> MRIValidatorArtifacts:
     """Legacy stub - no longer used."""
     raise NotImplementedError("Legacy validator model loading is deprecated")
@@ -484,7 +473,7 @@ def load_validator_model(
 def run_validator(
     validator_artifacts: MRIValidatorArtifacts,
     image: Image.Image,
-    device: torch.device,
+    device: Any,
     lock: Any | None = None,
 ) -> MRIValidatorResult:
     """Legacy stub - no longer used."""

@@ -9,4 +9,3 @@ joblib
 scikit-learn
 reportlab
 pillow
-opencv-python-headless
