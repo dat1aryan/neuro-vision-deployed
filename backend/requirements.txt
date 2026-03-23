@@ -2,13 +2,10 @@ fastapi
 uvicorn
 requests
 gradio_client
-torch
-torchvision
-grad-cam
-opencv-python
 python-multipart
-pandas
+opencv-python-headless
 numpy
+pandas
 joblib
 scikit-learn
 reportlab
