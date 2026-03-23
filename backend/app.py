@@ -47,7 +47,7 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-from backend.utils.mri_validator import (
+from utils.mri_validator import (
     optional_edge_check,
     validate_brain_mri,
     validate_file_format,
