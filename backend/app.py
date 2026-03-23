@@ -1,6 +1,6 @@
 """
 Install dependencies:
-pip install fastapi uvicorn torch torchvision pillow numpy pandas scikit-learn joblib grad-cam opencv-python
+pip install fastapi uvicorn pillow numpy pandas scikit-learn joblib
 pip install python-multipart
 
 Run server:
@@ -26,19 +26,12 @@ from typing import Any
 import joblib
 import numpy as np
 import pandas as pd
-import torch
-import cv2
 from gradio_client import Client, handle_file
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from PIL import Image
-from pytorch_grad_cam import GradCAM, GradCAMPlusPlus
-from pytorch_grad_cam.utils.image import show_cam_on_image
-from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
-from torch import nn
 from sklearn.pipeline import Pipeline
-from torchvision import models, transforms
 from pydantic import BaseModel
 from reportlab.lib.colors import HexColor
 from reportlab.lib.pagesizes import A4
@@ -73,7 +66,6 @@ COGNITIVE_MODEL_PATH = PROJECT_ROOT / "backend" / "models" / "cognitive_risk_mod
 COGNITIVE_FEATURES_PATH = PROJECT_ROOT / "backend" / "models" / "cognitive_features.pkl"
 PRIMARY_COGNITIVE_DATA_PATH = PROJECT_ROOT / "Data" / "alzheimers_disease_data.csv"
 FALLBACK_COGNITIVE_DATA_PATH = PROJECT_ROOT / "Data" / "Dataset" / "alzheimers_disease_data.csv"
-MRI_GRADCAM_MODEL_PATH: Path | None = None
 ML_SERVICE_API_URL = os.getenv(
     "ML_SERVICE_API_URL",
     "https://dat1aryan-neuro-vision-ml.hf.space",
@@ -82,10 +74,8 @@ ML_SERVICE_TIMEOUT_SECONDS = float(os.getenv("ML_SERVICE_TIMEOUT_SECONDS", "45")
 COGNITIVE_TEST_HISTORY_LIMIT = 200
 COGNITIVE_TEST_HISTORY: list[dict[str, Any]] = []
 COGNITIVE_TEST_HISTORY_LOCK = threading.Lock()
-MRI_HF_CLIENT = Client("dat1aryan/neuro-vision-ml")
-MRI_GRADCAM_DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-MRI_GRADCAM_MODEL: nn.Module | None = None
-MRI_GRADCAM_LOCK = threading.Lock()
+client = Client("dat1aryan/neuro-vision-ml")
+MRI_HF_CLIENT = client
 CORS_ORIGINS = [
     origin.strip()
     for origin in os.getenv(
@@ -98,15 +88,7 @@ CORS_ORIGINS = [
 CLASS_NAMES = ["glioma", "meningioma", "notumor", "pituitary"]
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
-IMAGE_SIZE = 224
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
-MRI_EVAL_TRANSFORM = transforms.Compose(
-    [
-        transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-        transforms.ToTensor(),
-        transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
-    ]
-)
 
 PRIMARY_MRI_TRAIN_DIR = PROJECT_ROOT / "Data" / "Training"
 PRIMARY_MRI_TEST_DIR = PROJECT_ROOT / "Data" / "Testing"
@@ -722,66 +704,23 @@ def predict_mri_with_heatmap(file_path: str) -> dict[str, Any]:
         )
     except Exception as error:
         logger.exception("%s MRI GradCAM call failed via HuggingFace", PLATFORM_NAME)
-        raise HTTPException(status_code=500, detail=f"MRI GradCAM request failed: {error}") from error
+        return {"error": "HF inference failed"}
 
     if isinstance(result, list) and result:
         result = result[0]
 
     if not isinstance(result, dict):
-        return {"error": "Heatmap not received from HF"}
+        return {"error": "HF inference failed"}
 
     print("HF RESULT:", result.keys())
 
     if not result or "heatmap" not in result:
-        return {"error": "Heatmap not received from HF"}
-
-    def decode_base64_image(base64_str: str) -> np.ndarray | None:
-        import base64
-
-        normalized = str(base64_str or "").strip()
-        if not normalized:
-            return None
-        if "," in normalized and normalized.startswith("data:image"):
-            normalized = normalized.split(",", 1)[1]
-
-        img_bytes = base64.b64decode(normalized)
-        np_arr = np.frombuffer(img_bytes, np.uint8)
-        return cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-
-    def enhance_heatmap(img: np.ndarray) -> np.ndarray:
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        gray = gray / 255.0
-
-        # Very light smoothing only (safe).
-        gray = cv2.GaussianBlur(gray, (3, 3), 0)
-
-        # Normalize safely.
-        gray = gray - gray.min()
-        gray = gray / (gray.max() + 1e-8)
-
-        heatmap = cv2.applyColorMap(np.uint8(255 * gray), cv2.COLORMAP_JET)
-        return heatmap
-
-    def encode_base64_image(img: np.ndarray) -> str:
-        import base64
-
-        _, buffer = cv2.imencode(".png", img)
-        return base64.b64encode(buffer).decode()
-
-    processed_heatmap = result.get("heatmap")
-    try:
-        decoded_heatmap = decode_base64_image(str(processed_heatmap or ""))
-        if decoded_heatmap is not None:
-            enhanced = enhance_heatmap(decoded_heatmap)
-            processed_heatmap = encode_base64_image(enhanced)
-            print("Heatmap processed successfully")
-    except Exception:
-        logger.exception("%s heatmap post-processing failed; returning original HF heatmap", PLATFORM_NAME)
+        return {"error": "HF inference failed"}
 
     return {
         "prediction": result.get("prediction"),
         "confidence": result.get("confidence"),
-        "heatmap": processed_heatmap,
+        "heatmap": result.get("heatmap"),
     }
 
 
@@ -807,338 +746,6 @@ def predict_mri_image_from_image(image: Image.Image, filename_hint: str = "image
             Path(temp_path).unlink(missing_ok=True)
         except OSError:
             logger.warning("Could not remove temporary MRI file: %s", temp_path)
-
-
-def _build_gradcam_model(uses_dropout_head: bool) -> nn.Module:
-    if hasattr(models, "ResNet50_Weights"):
-        model = models.resnet50(weights=None)
-    else:
-        model = models.resnet50(pretrained=False)
-
-    if uses_dropout_head:
-        model.fc = nn.Sequential(
-            nn.Dropout(p=0.3),
-            nn.Linear(model.fc.in_features, len(CLASS_NAMES)),
-        )
-    else:
-        model.fc = nn.Linear(model.fc.in_features, len(CLASS_NAMES))
-
-    return model
-
-
-def _get_gradcam_model() -> nn.Module:
-    global MRI_GRADCAM_MODEL
-
-    with MRI_GRADCAM_LOCK:
-        if MRI_GRADCAM_MODEL is not None:
-            return MRI_GRADCAM_MODEL
-
-        if MRI_GRADCAM_MODEL_PATH is None or not MRI_GRADCAM_MODEL_PATH.is_file():
-            raise RuntimeError("GradCAM model not available in deployment")
-
-        checkpoint = torch.load(MRI_GRADCAM_MODEL_PATH, map_location=MRI_GRADCAM_DEVICE)
-        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-            state_dict = checkpoint["model_state_dict"]
-        else:
-            state_dict = checkpoint
-
-        uses_dropout_head = any(
-            key.startswith("fc.1.") or ".fc.1." in key for key in state_dict.keys()
-        )
-
-        model = _build_gradcam_model(uses_dropout_head)
-        model.load_state_dict(state_dict)
-        model.to(MRI_GRADCAM_DEVICE)
-        model.eval()
-
-        MRI_GRADCAM_MODEL = model
-        return MRI_GRADCAM_MODEL
-
-
-def _prepare_gradcam_inputs(
-    image_input: Image.Image | bytes | bytearray,
-) -> tuple[torch.Tensor, np.ndarray]:
-    if isinstance(image_input, Image.Image):
-        image = image_input.convert("RGB")
-    else:
-        image = Image.open(io.BytesIO(bytes(image_input))).convert("RGB")
-    resized_image = image.resize((IMAGE_SIZE, IMAGE_SIZE), Image.Resampling.BILINEAR)
-    rgb_image = np.array(resized_image, dtype=np.float32) / 255.0
-    input_tensor = MRI_EVAL_TRANSFORM(resized_image).unsqueeze(0).to(MRI_GRADCAM_DEVICE)
-    return input_tensor, rgb_image
-
-
-def _predict_with_gradcam_model(
-    image_input: Image.Image | bytes | bytearray,
-) -> dict[str, Any]:
-    model = _get_gradcam_model()
-    input_tensor, _ = _prepare_gradcam_inputs(image_input)
-
-    with torch.inference_mode():
-        logits = model(input_tensor)
-        probability_tensor = torch.softmax(logits, dim=1).squeeze(0)
-
-    probability_array = probability_tensor.detach().cpu().numpy().astype(np.float64)
-    predicted_index = int(np.argmax(probability_array))
-    prediction = CLASS_NAMES[predicted_index]
-    confidence = float(probability_array[predicted_index])
-
-    entropy = -float(np.sum(probability_array * np.log(np.clip(probability_array, 1e-8, 1.0))))
-    normalized_entropy = entropy / float(np.log(max(2, len(CLASS_NAMES))))
-    uncertainty_score = float(_clamp(normalized_entropy, 0.0, 1.0))
-
-    if confidence >= MRI_CONFIDENCE_HIGH_THRESHOLD:
-        confidence_level = "High"
-    elif confidence >= MRI_CONFIDENCE_MEDIUM_THRESHOLD:
-        confidence_level = "Moderate"
-    else:
-        confidence_level = "Low"
-
-    tumor_probability = confidence if prediction != "notumor" else _clamp(1.0 - confidence, 0.0, 1.0)
-    notumor_probability = confidence if prediction == "notumor" else _clamp(1.0 - confidence, 0.0, 1.0)
-    class_probabilities = {
-        class_name: round(float(probability_array[idx]), 4)
-        for idx, class_name in enumerate(CLASS_NAMES)
-    }
-
-    return {
-        "prediction": prediction,
-        "tumor_prediction": prediction,
-        "confidence": confidence,
-        "tumor_confidence": confidence,
-        "raw_confidence": confidence,
-        "mri_uncertainty": uncertainty_score,
-        "uncertainty_score": uncertainty_score,
-        "uncertainty_variance": 0.0,
-        "uncertainty_entropy": round(float(normalized_entropy), 4),
-        "confidence_level": confidence_level,
-        "temperature": MRI_TEMPERATURE,
-        "tumor_probability": tumor_probability,
-        "notumor_probability": notumor_probability,
-        "class_probabilities": class_probabilities,
-    }
-
-
-def _resolve_gradcam_target_prediction(
-    image_input: Image.Image,
-    filename_hint: str,
-) -> dict[str, Any]:
-    local_prediction = _predict_with_gradcam_model(image_input)
-
-    try:
-        cloud_prediction, _ = predict_mri_image_from_image(image_input, filename_hint)
-    except Exception:
-        logger.warning(
-            "%s cloud MRI insight unavailable for GradCAM; using local prediction",
-            PLATFORM_NAME,
-        )
-        result = dict(local_prediction)
-        result["prediction_source"] = "local_fallback"
-        return result
-
-    local_probs = local_prediction.get("class_probabilities", {})
-    local_notumor = float(local_probs.get("notumor", 0.0))
-    local_label = str(local_prediction.get("prediction") or "").lower()
-    local_confidence = float(local_prediction.get("confidence") or 0.0)
-
-    cloud_label = str(cloud_prediction.get("prediction") or "").lower()
-    cloud_confidence = float(cloud_prediction.get("confidence") or 0.0)
-
-    # Guard no-tumor false positives by requiring strong evidence for tumor targeting.
-    if cloud_label == "notumor" and (cloud_confidence >= 0.58 or local_notumor >= 0.52):
-        result = dict(local_prediction)
-        result["prediction"] = "notumor"
-        result["tumor_prediction"] = "notumor"
-        result["confidence"] = max(cloud_confidence, local_notumor)
-        result["tumor_confidence"] = result["confidence"]
-        result["raw_confidence"] = result["confidence"]
-        result["prediction_source"] = "cloud_local_consensus"
-        return result
-
-    if local_label == "notumor" and local_confidence >= 0.78 and cloud_confidence < 0.72:
-        result = dict(local_prediction)
-        result["prediction_source"] = "local_notumor_override"
-        return result
-
-    if cloud_label != "notumor" and cloud_confidence >= 0.72 and local_notumor < 0.60:
-        result = dict(local_prediction)
-        result["prediction"] = cloud_label
-        result["tumor_prediction"] = cloud_label
-        result["confidence"] = cloud_confidence
-        result["tumor_confidence"] = cloud_confidence
-        result["raw_confidence"] = cloud_confidence
-        result["prediction_source"] = "cloud_primary"
-        return result
-
-    result = dict(local_prediction)
-    result["prediction_source"] = "local_primary_with_cloud_hint"
-    return result
-
-
-def _build_brain_mask(rgb_image: np.ndarray) -> np.ndarray:
-    gray_uint8 = cv2.cvtColor((rgb_image * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
-    blurred = cv2.GaussianBlur(gray_uint8, (5, 5), 0)
-    _, otsu_mask = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(otsu_mask)
-    if num_labels > 1:
-        largest_idx = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-        brain_mask = (labels == largest_idx).astype(np.float32)
-    else:
-        brain_mask = (otsu_mask > 0).astype(np.float32)
-
-    brain_mask = cv2.morphologyEx(brain_mask, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
-    brain_mask = cv2.morphologyEx(brain_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-    brain_mask = cv2.GaussianBlur(brain_mask, (0, 0), sigmaX=1.5, sigmaY=1.5)
-    return np.clip(brain_mask, 0.0, 1.0)
-
-
-def _compute_ensemble_cam(model: nn.Module, input_tensor: torch.Tensor, target_index: int) -> np.ndarray:
-    targets = [ClassifierOutputTarget(target_index)]
-    target_layers = [model.layer3[-1].conv3, model.layer4[-1].conv3]
-
-    cam_variants: list[tuple[np.ndarray, float]] = []
-    for cam_cls, variant_weight in ((GradCAMPlusPlus, 0.65), (GradCAM, 0.35)):
-        with cam_cls(model=model, target_layers=target_layers) as cam_extractor:
-            base_cam = cam_extractor(input_tensor=input_tensor, targets=targets)[0]
-
-            # Test-time augmentation: horizontal flip CAM, then unflip and blend.
-            flipped_input = torch.flip(input_tensor, dims=[3])
-            flipped_cam = cam_extractor(input_tensor=flipped_input, targets=targets)[0]
-
-        flipped_cam = np.flip(flipped_cam, axis=1)
-        blended_cam = (0.6 * base_cam) + (0.4 * flipped_cam)
-        cam_variants.append((blended_cam.astype(np.float32), variant_weight))
-
-    cam_sum = np.zeros_like(cam_variants[0][0], dtype=np.float32)
-    weight_sum = 0.0
-    for cam_map, weight in cam_variants:
-        cam_sum += cam_map * float(weight)
-        weight_sum += float(weight)
-
-    merged_cam = cam_sum / max(weight_sum, 1e-8)
-    merged_cam = np.clip(merged_cam, 0.0, None)
-    max_value = float(merged_cam.max())
-    if max_value > 1e-8:
-        merged_cam = merged_cam / max_value
-
-    return merged_cam
-
-
-def _refine_hotspots(masked_cam: np.ndarray, confidence: float) -> np.ndarray:
-    percentile = 82.0 if confidence >= 0.80 else 88.0
-    hotspot_threshold = float(np.percentile(masked_cam, percentile))
-    hotspot_mask = (masked_cam >= hotspot_threshold).astype(np.uint8)
-
-    count, cc_labels, cc_stats, _ = cv2.connectedComponentsWithStats(hotspot_mask)
-    if count <= 1:
-        return masked_cam
-
-    peak_y, peak_x = np.unravel_index(int(np.argmax(masked_cam)), masked_cam.shape)
-    peak_label = int(cc_labels[peak_y, peak_x])
-
-    keep_ids: list[int] = []
-    if peak_label > 0:
-        keep_ids.append(peak_label)
-
-    # For lower-confidence predictions, keep one additional large region.
-    if confidence < 0.75:
-        areas = cc_stats[1:, cv2.CC_STAT_AREA]
-        sorted_ids = (np.argsort(areas)[::-1] + 1).tolist()
-        for component_id in sorted_ids:
-            if component_id not in keep_ids:
-                keep_ids.append(int(component_id))
-                break
-
-    if not keep_ids:
-        return masked_cam
-
-    keep_mask = np.isin(cc_labels, keep_ids).astype(np.float32)
-    keep_mask = cv2.GaussianBlur(keep_mask, (0, 0), sigmaX=1.0, sigmaY=1.0)
-    refined = masked_cam * np.clip(keep_mask, 0.0, 1.0)
-
-    refined = cv2.GaussianBlur(refined, (0, 0), sigmaX=0.8, sigmaY=0.8)
-    max_value = float(refined.max())
-    if max_value > 1e-8:
-        refined = refined / max_value
-
-    return refined
-
-
-def generate_gradcam_image(
-    image_input: Image.Image | bytes | bytearray,
-    target_class_name: str | None = None,
-    target_confidence: float | None = None,
-) -> str | None:
-    # Hybrid GradCAM: local-quality visualization with brain masking and no-tumor safeguards.
-    try:
-        model = _get_gradcam_model()
-        input_tensor, rgb_image = _prepare_gradcam_inputs(image_input)
-
-        with torch.inference_mode():
-            logits = model(input_tensor)
-            probabilities = torch.softmax(logits, dim=1)
-            predicted_index = int(probabilities.argmax(dim=1).item())
-
-        target_index = predicted_index
-        normalized_name = None
-        if target_class_name:
-            normalized_name = str(target_class_name).strip().lower()
-            if normalized_name in CLASS_NAMES:
-                target_index = CLASS_NAMES.index(normalized_name)
-
-        brain_mask = _build_brain_mask(rgb_image)
-        confidence = float(target_confidence or 0.0)
-
-        # For no-tumor, avoid tumor-like hotspots and return a restrained cool map.
-        if normalized_name == "notumor" and confidence >= 0.55:
-            gray_uint8 = cv2.cvtColor((rgb_image * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
-            base_signal = cv2.normalize(gray_uint8.astype(np.float32), None, 0.0, 1.0, cv2.NORM_MINMAX)
-            base_signal = cv2.GaussianBlur(base_signal * brain_mask, (0, 0), sigmaX=1.2, sigmaY=1.2)
-
-            blue = np.clip(0.28 + (0.62 * base_signal), 0.0, 1.0)
-            green = np.clip(0.08 + (0.26 * base_signal), 0.0, 1.0)
-            red = np.clip(0.03 + (0.10 * base_signal), 0.0, 1.0)
-            cool_map = np.stack([red, green, blue], axis=-1)
-
-            base_rgb = np.repeat(base_signal[..., None], 3, axis=2) * 0.35
-            enhanced = np.clip((0.70 * cool_map) + (0.30 * base_rgb), 0.0, 1.0)
-            enhanced = enhanced * (0.25 + 0.75 * brain_mask[..., None])
-            enhanced_smooth = cv2.GaussianBlur((enhanced * 255.0).astype(np.uint8), (3, 3), sigmaX=0.5, sigmaY=0.5)
-        else:
-            grayscale_cam = _compute_ensemble_cam(model, input_tensor, target_index)
-            masked_cam = np.clip(grayscale_cam * brain_mask, 0.0, None)
-            masked_cam = np.power(masked_cam, 0.88)
-            masked_cam = _refine_hotspots(masked_cam, confidence)
-
-            peak = float(masked_cam.max())
-            if peak > 1e-8:
-                masked_cam = masked_cam / peak
-
-            base_image = np.clip(
-                rgb_image * (0.30 + (0.70 * brain_mask[..., None])),
-                0.0,
-                1.0,
-            )
-            cam_overlay = show_cam_on_image(
-                base_image,
-                np.clip(masked_cam, 0.0, 1.0),
-                use_rgb=True,
-                image_weight=0.36,
-            )
-            enhanced_smooth = cv2.GaussianBlur(cam_overlay, (3, 3), sigmaX=0.45, sigmaY=0.45)
-
-        # Encode heatmap to base64 (in-memory, no disk I/O)
-        heatmap_image = Image.fromarray(enhanced_smooth)
-        buffer = io.BytesIO()
-        heatmap_image.save(buffer, format="PNG")
-        buffer.seek(0)
-        import base64
-        base64_image = base64.b64encode(buffer.getvalue()).decode()
-        return f"data:image/png;base64,{base64_image}"
-    except Exception as error:
-        logger.exception("%s failed to generate GradCAM artifact", PLATFORM_NAME)
-        return None
 
 
 def coerce_feature_value(feature: str, value: Any, default: Any) -> Any:
@@ -1770,11 +1377,20 @@ def run_full_analysis(
     image_for_prediction = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     mri_result, prepared_image = predict_mri_image_from_image(image_for_prediction, filename)
 
-    gradcam_image = generate_gradcam_image(
-        prepared_image,
-        mri_result.get("prediction"),
-        mri_result.get("confidence"),
-    )
+    suffix = Path(filename or "image.png").suffix or ".png"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+        prepared_image.save(temp_file, format="PNG")
+        temp_path = temp_file.name
+
+    try:
+        hf_result = predict_mri_with_heatmap(temp_path)
+    finally:
+        try:
+            Path(temp_path).unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Could not remove temporary MRI file: %s", temp_path)
+
+    gradcam_image = hf_result.get("heatmap") if isinstance(hf_result, dict) else None
 
     cognitive_result = predict_cognitive_risk(artifacts, cognitive_payload)
     cognitive_score = float(cognitive_result.get("risk_score") or 0.0)
@@ -2680,4 +2296,4 @@ async def generate_report_pdf(payload: ReportRequest) -> StreamingResponse:
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=8000)
+    uvicorn.run("app:app", host="0.0.0.0", port=10000)

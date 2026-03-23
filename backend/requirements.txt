@@ -3,7 +3,6 @@ uvicorn
 requests
 gradio_client
 python-multipart
-opencv-python-headless
 numpy
 pandas
 joblib
