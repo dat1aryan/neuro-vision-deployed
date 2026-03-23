@@ -11,7 +11,7 @@ function toPercent(value) {
 }
 
 
-export default function ReportPanel({ report, loading, disabled, onGenerate, onExportPDF, exportingPdf }) {
+export default function ReportPanel({ report, heatmap, loading, disabled, onGenerate, onExportPDF, exportingPdf }) {
   return (
     <section className="glass-card h-full p-6 sm:p-7">
       <div className="relative z-10">
@@ -97,6 +97,15 @@ export default function ReportPanel({ report, loading, disabled, onGenerate, onE
                 <p className="metric-label">Summary</p>
                 <p className="mt-2 text-sm leading-7 text-slate-300">{report.summary}</p>
               </div>
+
+              {heatmap ? (
+                <div className="surface-panel">
+                  <p className="metric-label">GradCAM Heatmap</p>
+                  <div className="mt-3 overflow-hidden rounded-xl border border-slate-700/70 bg-slate-950/50">
+                    <img src={heatmap} alt="GradCAM Heatmap" className="h-64 w-full bg-slate-950/85 object-contain" />
+                  </div>
+                </div>
+              ) : null}
 
               {report.clinical_disclaimer ? (
                 <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4">

@@ -187,6 +187,10 @@ function App() {
     navigate('/', { replace: true, state: null });
   }, [location.state, navigate]);
 
+  useEffect(() => {
+    console.log('Heatmap state:', gradcamUrl);
+  }, [gradcamUrl]);
+
   const dashboardCards = useMemo(
     () => {
       function getPhase(isLoading, hasResult) {
@@ -425,10 +429,10 @@ function App() {
         risk_probability: cognitiveResult.risk_probability,
         risk_score: cognitiveResult.risk_probability,
         cognitive_model_probability: cognitiveResult.model_probability,
+        gradcam_image: gradcamUrl || data.gradcam_image || data.imageUrl || null,
       };
 
       setReport(stabilizedReport);
-      setGradcamUrl(data.imageUrl || '');
       notify('success', 'Report ready', 'Neuro Vision brain health report is ready.');
     } catch (error) {
       notify('error', 'Report generation failed', formatApiError(error, 'Unable to generate AI report.'));
@@ -549,6 +553,7 @@ function App() {
           <motion.section variants={reveal} initial="hidden" whileInView="show" viewport={{ once: true, amount: 0.2 }}>
             <ReportPanel
               report={report}
+              heatmap={gradcamUrl}
               loading={loading.report}
               disabled={!selectedFile}
               onGenerate={handleGenerateReport}

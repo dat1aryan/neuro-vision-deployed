@@ -73,7 +73,7 @@ COGNITIVE_MODEL_PATH = PROJECT_ROOT / "backend" / "models" / "cognitive_risk_mod
 COGNITIVE_FEATURES_PATH = PROJECT_ROOT / "backend" / "models" / "cognitive_features.pkl"
 PRIMARY_COGNITIVE_DATA_PATH = PROJECT_ROOT / "Data" / "alzheimers_disease_data.csv"
 FALLBACK_COGNITIVE_DATA_PATH = PROJECT_ROOT / "Data" / "Dataset" / "alzheimers_disease_data.csv"
-MRI_GRADCAM_MODEL_PATH = PROJECT_ROOT / "ml_service" / "models" / "mri_model_best.pth"
+MRI_GRADCAM_MODEL_PATH: Path | None = None
 ML_SERVICE_API_URL = os.getenv(
     "ML_SERVICE_API_URL",
     "https://dat1aryan-neuro-vision-ml.hf.space",
@@ -714,6 +714,77 @@ def predict_mri_image(file_path: str) -> dict[str, Any]:
     }
 
 
+def predict_mri_with_heatmap(file_path: str) -> dict[str, Any]:
+    try:
+        result = MRI_HF_CLIENT.predict(
+            image=handle_file(file_path),
+            api_name="/predict",
+        )
+    except Exception as error:
+        logger.exception("%s MRI GradCAM call failed via HuggingFace", PLATFORM_NAME)
+        raise HTTPException(status_code=500, detail=f"MRI GradCAM request failed: {error}") from error
+
+    if isinstance(result, list) and result:
+        result = result[0]
+
+    if not isinstance(result, dict):
+        return {"error": "Heatmap not received from HF"}
+
+    print("HF RESULT:", result.keys())
+
+    if not result or "heatmap" not in result:
+        return {"error": "Heatmap not received from HF"}
+
+    def decode_base64_image(base64_str: str) -> np.ndarray | None:
+        import base64
+
+        normalized = str(base64_str or "").strip()
+        if not normalized:
+            return None
+        if "," in normalized and normalized.startswith("data:image"):
+            normalized = normalized.split(",", 1)[1]
+
+        img_bytes = base64.b64decode(normalized)
+        np_arr = np.frombuffer(img_bytes, np.uint8)
+        return cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+    def enhance_heatmap(img: np.ndarray) -> np.ndarray:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        gray = gray / 255.0
+
+        # Very light smoothing only (safe).
+        gray = cv2.GaussianBlur(gray, (3, 3), 0)
+
+        # Normalize safely.
+        gray = gray - gray.min()
+        gray = gray / (gray.max() + 1e-8)
+
+        heatmap = cv2.applyColorMap(np.uint8(255 * gray), cv2.COLORMAP_JET)
+        return heatmap
+
+    def encode_base64_image(img: np.ndarray) -> str:
+        import base64
+
+        _, buffer = cv2.imencode(".png", img)
+        return base64.b64encode(buffer).decode()
+
+    processed_heatmap = result.get("heatmap")
+    try:
+        decoded_heatmap = decode_base64_image(str(processed_heatmap or ""))
+        if decoded_heatmap is not None:
+            enhanced = enhance_heatmap(decoded_heatmap)
+            processed_heatmap = encode_base64_image(enhanced)
+            print("Heatmap processed successfully")
+    except Exception:
+        logger.exception("%s heatmap post-processing failed; returning original HF heatmap", PLATFORM_NAME)
+
+    return {
+        "prediction": result.get("prediction"),
+        "confidence": result.get("confidence"),
+        "heatmap": processed_heatmap,
+    }
+
+
 def predict_mri_image_from_image(image: Image.Image, filename_hint: str = "image.png") -> tuple[dict[str, Any], Image.Image]:
     """
     Predict MRI classification and return both prediction and the preprocessed image.
@@ -762,8 +833,8 @@ def _get_gradcam_model() -> nn.Module:
         if MRI_GRADCAM_MODEL is not None:
             return MRI_GRADCAM_MODEL
 
-        if not MRI_GRADCAM_MODEL_PATH.is_file():
-            raise FileNotFoundError(f"GradCAM MRI model not found at {MRI_GRADCAM_MODEL_PATH}")
+        if MRI_GRADCAM_MODEL_PATH is None or not MRI_GRADCAM_MODEL_PATH.is_file():
+            raise RuntimeError("GradCAM model not available in deployment")
 
         checkpoint = torch.load(MRI_GRADCAM_MODEL_PATH, map_location=MRI_GRADCAM_DEVICE)
         if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
@@ -1845,26 +1916,27 @@ async def gradcam(request: Request, file: UploadFile = File(...)) -> Any:
         )
 
     prepared_image = validated_image.convert("RGB")
-    mri_prediction = _resolve_gradcam_target_prediction(
-        prepared_image,
-        file.filename or "image.png",
-    )
+    suffix = Path(file.filename or "image.png").suffix or ".png"
 
-    heatmap = generate_gradcam_image(
-        prepared_image,
-        mri_prediction.get("prediction"),
-        mri_prediction.get("confidence"),
-    )
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+        prepared_image.save(temp_file, format="PNG")
+        temp_path = temp_file.name
 
-    if not heatmap:
-        raise HTTPException(status_code=500, detail="Unable to generate GradCAM heatmap")
+    try:
+        hf_result = predict_mri_with_heatmap(temp_path)
+    finally:
+        try:
+            Path(temp_path).unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Could not remove temporary MRI file: %s", temp_path)
+
+    if "error" in hf_result:
+        return hf_result
 
     return {
-        "prediction": mri_prediction.get("prediction"),
-        "confidence": float(mri_prediction.get("confidence") or 0.0),
-        "prediction_source": mri_prediction.get("prediction_source", "unknown"),
-        "heatmap": heatmap,
-        "gradcam_image": heatmap,
+        "prediction": hf_result.get("prediction"),
+        "confidence": hf_result.get("confidence"),
+        "heatmap": hf_result.get("heatmap"),
     }
 
 
@@ -2604,3 +2676,8 @@ async def generate_report_pdf(payload: ReportRequest) -> StreamingResponse:
         media_type="application/pdf",
         headers={"Content-Disposition": 'attachment; filename="neurovision_report.pdf"'},
     )
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("app:app", host="0.0.0.0", port=8000)

@@ -151,11 +151,34 @@ export async function generateGradCAM(file) {
   const formData = new FormData();
   formData.append('file', file);
 
-  const { data } = await api.post('/gradcam', formData, {
-    headers: multipartHeaders,
+  const response = await fetch(`${BASE_URL}/gradcam`, {
+    method: 'POST',
+    body: formData,
   });
 
-  const heatmap = data?.heatmap || data?.gradcam_image || '';
+  if (!response.ok) {
+    let detail = 'GradCAM request failed';
+    try {
+      const payload = await response.json();
+      detail = payload?.detail || payload?.message || payload?.error || detail;
+    } catch {
+      // Keep default error detail when response is not JSON.
+    }
+    throw new Error(String(detail));
+  }
+
+  const data = await response.json();
+  console.log('API RESPONSE:', data);
+
+  if (!data || !data.heatmap) {
+    throw new Error('Heatmap missing from backend response');
+  }
+
+  const rawHeatmap = String(data.heatmap || '').trim();
+  const heatmapSrc = rawHeatmap.startsWith('data:image/')
+    ? rawHeatmap
+    : `data:image/png;base64,${rawHeatmap}`;
+
   const prediction = String(data?.prediction || '').toLowerCase();
   const confidence = toNumber(data?.confidence);
 
@@ -165,9 +188,9 @@ export async function generateGradCAM(file) {
     tumor_prediction: prediction,
     confidence,
     tumor_confidence: confidence,
-    heatmap,
-    gradcam_image: heatmap,
-    imageUrl: resolveHeatmapUrl(heatmap),
+    heatmap: heatmapSrc,
+    gradcam_image: heatmapSrc,
+    imageUrl: heatmapSrc,
   };
 }
 
