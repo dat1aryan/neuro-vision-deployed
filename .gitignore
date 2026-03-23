@@ -1,0 +1,28 @@
+﻿# Python
+.venv/
+**/__pycache__/
+*.pyc
+
+# Node
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+
+# Env
+.env
+**/.env
+
+# ML large files
+*.pth
+
+# Cache / logs
+*.log
+
+# Generated artifacts
+generated_assets/
+gradcam_output.jpg
+gradcam_output.png
+
+# OS
+.DS_Store

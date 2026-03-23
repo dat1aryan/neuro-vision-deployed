@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+requests
+gradio_client
+torch
+torchvision
+grad-cam
+opencv-python
+python-multipart
+pandas
+numpy
+joblib
+scikit-learn
+reportlab
+pillow
