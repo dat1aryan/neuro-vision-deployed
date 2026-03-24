@@ -4,7 +4,7 @@ pip install fastapi uvicorn pillow numpy pandas scikit-learn joblib
 pip install python-multipart
 
 Run server:
-uvicorn backend.app:app --reload
+uvicorn app:app --host 0.0.0.0 --port 10000
 """
 
 from __future__ import annotations
@@ -76,14 +76,6 @@ COGNITIVE_TEST_HISTORY: list[dict[str, Any]] = []
 COGNITIVE_TEST_HISTORY_LOCK = threading.Lock()
 client = Client("dat1aryan/neuro-vision-ml")
 MRI_HF_CLIENT = client
-CORS_ORIGINS = [
-    origin.strip()
-    for origin in os.getenv(
-        "CORS_ORIGINS",
-        "http://localhost:5173,http://127.0.0.1:5173",
-    ).split(",")
-    if origin.strip()
-]
 
 CLASS_NAMES = ["glioma", "meningioma", "notumor", "pituitary"]
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
@@ -515,11 +507,20 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title=PLATFORM_NAME, lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=CORS_ORIGINS,
+    allow_origins=[
+        "http://localhost:5173",
+        "https://neuro-vision-deployed.vercel.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def debug_request_log(request: Request, call_next):
+    print("Incoming request received")
+    return await call_next(request)
 
 
 def normalize_key(name: str) -> str:
@@ -1484,7 +1485,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 
 @app.get("/")
 async def root() -> dict[str, str]:
-    return {"message": "Neuro Vision Multimodal AI Backend Running"}
+    return {"status": "ok"}
 
 
 @app.post("/predict_mri")
