@@ -82,6 +82,13 @@ function normalizeCognitiveResult(data) {
   };
 }
 
+function getFileCacheKey(file) {
+  if (!file) {
+    return '';
+  }
+  return [file.name, file.size, file.lastModified, file.type].join('::');
+}
+
 
 function App() {
   const dashboardRef = useRef(null);
@@ -93,12 +100,14 @@ function App() {
     message: 'Checking Neuro Vision backend...',
   });
   const [selectedFile, setSelectedFile] = useState(null);
+  const [uploadedFile, setUploadedFile] = useState(null);
   const [previewUrl, setPreviewUrl] = useState('');
   const [clinicalData, setClinicalData] = useState(initialClinicalState);
   const [mriResult, setMriResult] = useState(null);
   const [cognitiveResult, setCognitiveResult] = useState(null);
   const [gradcamUrl, setGradcamUrl] = useState('');
   const [report, setReport] = useState(null);
+  const [lastResult, setLastResult] = useState(null);
   const [toasts, setToasts] = useState([]);
   const [loading, setLoading] = useState({
     mri: false,
@@ -293,6 +302,7 @@ function App() {
     }
 
     setSelectedFile(file);
+    setUploadedFile(file);
     setReport(null);
     setGradcamUrl('');
     setMriResult(null);
@@ -312,16 +322,60 @@ function App() {
   }
 
   async function handleAnalyzeMRI() {
+    if (loading.mri) {
+      return;
+    }
+
     if (!selectedFile) {
       notify('error', 'MRI required', 'Upload an MRI scan before running analysis.');
       return;
     }
 
+    const fileKey = getFileCacheKey(selectedFile);
+    if (lastResult?.fileKey === fileKey && lastResult?.mri) {
+      setMriResult(lastResult.mri);
+      notify('success', 'MRI analysis complete', `Tumor prediction: ${lastResult.mri.tumor_prediction}.`);
+      return;
+    }
+
     updateLoadingState('mri', true);
+
+    const predictionPromise = predictMRI(selectedFile);
+
+    // Start GradCAM in parallel to keep UI responsive while prediction returns first.
+    const shouldPrefetchHeatmap = !(lastResult?.fileKey === fileKey && lastResult?.heatmapData);
+    const heatmapPromise = shouldPrefetchHeatmap ? generateGradCAM(selectedFile) : Promise.resolve(null);
+
+    if (shouldPrefetchHeatmap && !loading.gradcam) {
+      updateLoadingState('gradcam', true);
+      heatmapPromise
+        .then((heatmapData) => {
+          if (!heatmapData) {
+            return;
+          }
+          setLastResult((current) => ({
+            ...(current || {}),
+            fileKey,
+            heatmapData,
+          }));
+        })
+        .catch(() => {
+          // Ignore background prefetch errors and keep explicit heatmap action unchanged.
+        })
+        .finally(() => {
+          updateLoadingState('gradcam', false);
+        });
+    }
+
     try {
-      const data = await predictMRI(selectedFile);
+      const [data] = await Promise.all([predictionPromise]);
       const normalized = normalizeMRIResult(data);
       setMriResult(normalized);
+      setLastResult((current) => ({
+        ...(current || {}),
+        fileKey,
+        mri: normalized,
+      }));
       notify('success', 'MRI analysis complete', `Tumor prediction: ${normalized.tumor_prediction}.`);
     } catch (error) {
       notify('error', 'MRI analysis failed', formatApiError(error, 'Unable to analyze MRI scan.'));
@@ -331,6 +385,10 @@ function App() {
   }
 
   async function handlePredictCognitive() {
+    if (loading.cognitive) {
+      return;
+    }
+
     const payload = buildClinicalPayload(clinicalData);
     if (!Object.keys(payload).length) {
       notify('error', 'Clinical data required', 'Fill in clinical values before prediction.');
@@ -355,8 +413,20 @@ function App() {
   }
 
   async function handleGenerateGradCAM() {
+    if (loading.gradcam) {
+      return;
+    }
+
     if (!selectedFile) {
       notify('error', 'MRI required', 'Upload an MRI scan before generating GradCAM.');
+      return;
+    }
+
+    const fileKey = getFileCacheKey(selectedFile);
+    if (lastResult?.fileKey === fileKey && lastResult?.heatmapData) {
+      setMriResult(normalizeMRIResult(lastResult.heatmapData));
+      setGradcamUrl(lastResult.heatmapData.imageUrl);
+      notify('success', 'GradCAM ready', 'Heatmap loaded from cache.');
       return;
     }
 
@@ -365,6 +435,11 @@ function App() {
       const data = await generateGradCAM(selectedFile);
       setMriResult(normalizeMRIResult(data));
       setGradcamUrl(data.imageUrl);
+      setLastResult((current) => ({
+        ...(current || {}),
+        fileKey,
+        heatmapData: data,
+      }));
       notify('success', 'GradCAM ready', 'Heatmap generated successfully.');
     } catch (error) {
       notify('error', 'GradCAM generation failed', formatApiError(error, 'Unable to generate GradCAM heatmap.'));
@@ -374,7 +449,7 @@ function App() {
   }
 
   async function handleExportPDF() {
-    if (!report) return;
+    if (!report || loading.exportPdf) return;
     setLoading(prev => ({ ...prev, exportPdf: true }));
     try {
       await exportToPDF({
@@ -389,7 +464,11 @@ function App() {
   }
 
   async function handleGenerateReport() {
-    if (!selectedFile) {
+    if (loading.report) {
+      return;
+    }
+
+    if (!uploadedFile) {
       notify('error', 'MRI required', 'Upload an MRI scan before generating the report.');
       return;
     }
@@ -411,7 +490,7 @@ function App() {
 
     updateLoadingState('report', true);
     try {
-      const data = await generateAIReport(selectedFile, payload);
+      const data = await generateAIReport(uploadedFile, payload);
 
       // Keep report aligned with the already computed MRI and cognitive assessments.
       const stabilizedReport = {

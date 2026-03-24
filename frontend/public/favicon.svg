@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Neuro Vision Favicon">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="100%" stop-color="#0b1220" />
+    </linearGradient>
+    <linearGradient id="stroke" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#06b6d4" />
+      <stop offset="100%" stop-color="#22d3ee" />
+    </linearGradient>
+  </defs>
+  <rect x="3" y="3" width="58" height="58" rx="14" fill="url(#bg)" />
+  <path d="M20 44V20L44 44V20" fill="none" stroke="url(#stroke)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" />
+  <circle cx="20" cy="20" r="3" fill="#22d3ee" />
+  <circle cx="44" cy="20" r="3" fill="#22d3ee" />
+  <circle cx="20" cy="44" r="3" fill="#22d3ee" />
+  <circle cx="44" cy="44" r="3" fill="#22d3ee" />
+</svg>

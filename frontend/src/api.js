@@ -1,16 +1,44 @@
 import axios from 'axios';
 
-const BASE_URL = import.meta.env.VITE_API_URL;
-export const API_BASE_URL = BASE_URL;
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+export const API_BASE_URL = API_URL;
+const REQUEST_TIMEOUT_MS = 25000;
+const RETRY_COUNT = 1;
 
 const api = axios.create({
   baseURL: API_BASE_URL || undefined,
   timeout: 60000,
 });
 
-const multipartHeaders = {
-  'Content-Type': 'multipart/form-data',
-};
+async function safeFetch(fn, retries = RETRY_COUNT) {
+  try {
+    return await fn();
+  } catch (error) {
+    if (retries > 0) {
+      return safeFetch(fn, retries - 1);
+    }
+    throw error;
+  }
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new Error('Request timed out. Please try again.');
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
 
 function toNumber(value, fallback = 0) {
   const parsed = Number(value);
@@ -18,10 +46,10 @@ function toNumber(value, fallback = 0) {
 }
 
 function withApiBase(path) {
-  if (!BASE_URL) {
+  if (!API_URL) {
     return path;
   }
-  return `${BASE_URL}${path}`;
+  return `${API_URL}${path}`;
 }
 
 function resolveHeatmapUrl(heatmapValue) {
@@ -52,10 +80,12 @@ export async function predictMRI(file) {
   const formData = new FormData();
   formData.append('file', file);
 
-  const response = await fetch(`${BASE_URL}/api/prediction/mri`, {
-    method: 'POST',
-    body: formData,
-  });
+  const response = await safeFetch(() =>
+    fetchWithTimeout(`${API_URL}/api/prediction/mri`, {
+      method: 'POST',
+      body: formData,
+    }),
+  );
 
   if (!response.ok) {
     let detail = 'MRI request failed';
@@ -86,7 +116,11 @@ export async function predictMRI(file) {
 }
 
 export async function predictCognitive(payload) {
-  const { data } = await api.post('/api/prediction/cognitive', payload);
+  const { data } = await api.post('/api/prediction/cognitive', payload, {
+    headers: {
+      'Content-Type': 'application/json',
+    },
+  });
   return {
     ...data,
     cognitive_risk: String(data?.cognitive_risk || data?.risk_label || '').toLowerCase(),
@@ -134,7 +168,11 @@ export async function getCognitiveSpatialRotationQuestions() {
 }
 
 export async function submitCognitiveTestResults(payload) {
-  const { data } = await api.post('/cognitive-test-results', payload);
+  const { data } = await api.post('/cognitive-test-results', payload, {
+    headers: {
+      'Content-Type': 'application/json',
+    },
+  });
   return {
     memory_score: Number(data.memory_score ?? 0),
     cognitive_score: Number(data.cognitive_score ?? 0),
@@ -151,10 +189,12 @@ export async function generateGradCAM(file) {
   const formData = new FormData();
   formData.append('file', file);
 
-  const response = await fetch(`${BASE_URL}/gradcam`, {
-    method: 'POST',
-    body: formData,
-  });
+  const response = await safeFetch(() =>
+    fetchWithTimeout(`${API_URL}/gradcam`, {
+      method: 'POST',
+      body: formData,
+    }),
+  );
 
   if (!response.ok) {
     let detail = 'GradCAM request failed';
@@ -199,9 +239,25 @@ export async function generateAIReport(file, payload) {
   formData.append('file', file);
   formData.append('clinical_json', JSON.stringify(payload));
 
-  const { data } = await api.post('/api/prediction/final-risk', formData, {
-    headers: multipartHeaders,
-  });
+  const response = await safeFetch(() =>
+    fetchWithTimeout(`${API_URL}/api/prediction/final-risk`, {
+      method: 'POST',
+      body: formData,
+    }),
+  );
+
+  if (!response.ok) {
+    let detail = 'Report request failed';
+    try {
+      const payloadResponse = await response.json();
+      detail = payloadResponse?.detail || payloadResponse?.message || payloadResponse?.error || detail;
+    } catch {
+      // Keep default error detail when response is not JSON.
+    }
+    throw new Error(String(detail));
+  }
+
+  const data = await response.json();
 
   const tumorConfidence = toNumber(data?.tumor_confidence ?? data?.confidence);
   const riskProbability = toNumber(data?.risk_probability ?? data?.risk_score);
@@ -249,7 +305,12 @@ export async function exportToPDF(reportData) {
     report_summary: reportData.summary || reportData.report_summary || '',
     gradcam_image: reportData.gradcam_image || null,
   };
-  const response = await api.post('/generate-report', payload, { responseType: 'blob' });
+  const response = await api.post('/generate-report', payload, {
+    responseType: 'blob',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+  });
   const url = window.URL.createObjectURL(new Blob([response.data], { type: 'application/pdf' }));
   const link = document.createElement('a');
   link.href = url;
