@@ -229,10 +229,10 @@ https://www.genspark.ai/slides?project_id=254028ee-6d15-4d80-854c-82566cbca498
 
 # 👥 Team
 
-Aryan Kumar — Full Stack Developer
-Krishna Prakash — Machine Learning Developer
-Preesha Bhardwaj — Designer & Frontend Developer
-Saurabh Mazumdar — Lead Developer
+* Aryan Kumar — Full Stack Developer
+* Krishna Prakash — Machine Learning Developer
+* Preesha Bhardwaj — Designer & Frontend Developer
+* Saurabh Mazumdar — Lead Developer
 
 ---
 
