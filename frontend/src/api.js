@@ -1,14 +1,81 @@
 import axios from 'axios';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-export const API_BASE_URL = API_URL;
+function normalizeBaseUrl(url) {
+  return String(url || '').trim().replace(/\/$/, '');
+}
+
+const DEFAULT_PRIMARY_API_URL = 'https://api.neuro-vision.me';
+const DEFAULT_FALLBACK_API_URL = 'https://neuro-vision-deployed.onrender.com';
+
+const envPrimaryUrl =
+  import.meta.env.NEXT_PUBLIC_API_URL ||
+  import.meta.env.VITE_API_URL ||
+  DEFAULT_PRIMARY_API_URL;
+const envFallbackUrl =
+  import.meta.env.NEXT_PUBLIC_API_FALLBACK_URL ||
+  import.meta.env.VITE_API_FALLBACK_URL ||
+  DEFAULT_FALLBACK_API_URL;
+
+const PRIMARY_API_URL = normalizeBaseUrl(envPrimaryUrl);
+const FALLBACK_API_URL = normalizeBaseUrl(envFallbackUrl);
+
+const API_BASE_URLS = [...new Set([PRIMARY_API_URL, FALLBACK_API_URL].filter(Boolean))];
+let activeApiBaseUrl = PRIMARY_API_URL;
+
+export const API_BASE_URL = PRIMARY_API_URL;
 const REQUEST_TIMEOUT_MS = 25000;
 const RETRY_COUNT = 1;
 
 const api = axios.create({
-  baseURL: API_BASE_URL || undefined,
+  baseURL: PRIMARY_API_URL || undefined,
   timeout: 60000,
 });
+
+function shouldFallbackStatus(status) {
+  return !status || status >= 500;
+}
+
+function shouldFallbackAxiosError(error) {
+  if (!error.response) {
+    return true;
+  }
+  return shouldFallbackStatus(error.response.status);
+}
+
+api.interceptors.response.use(
+  (response) => {
+    const responseBase = normalizeBaseUrl(response.config?.baseURL || PRIMARY_API_URL);
+    if (responseBase) {
+      activeApiBaseUrl = responseBase;
+    }
+    return response;
+  },
+  async (error) => {
+    const originalConfig = error?.config || {};
+    const requestBase = normalizeBaseUrl(originalConfig.baseURL || PRIMARY_API_URL);
+    const canRetryOnFallback =
+      Boolean(FALLBACK_API_URL) &&
+      requestBase === PRIMARY_API_URL &&
+      !originalConfig.__isFallbackRetry &&
+      shouldFallbackAxiosError(error);
+
+    if (!canRetryOnFallback) {
+      return Promise.reject(error);
+    }
+
+    try {
+      const fallbackResponse = await api.request({
+        ...originalConfig,
+        baseURL: FALLBACK_API_URL,
+        __isFallbackRetry: true,
+      });
+      activeApiBaseUrl = FALLBACK_API_URL;
+      return fallbackResponse;
+    } catch (fallbackError) {
+      return Promise.reject(fallbackError);
+    }
+  },
+);
 
 async function safeFetch(fn, retries = RETRY_COUNT) {
   try {
@@ -46,10 +113,46 @@ function toNumber(value, fallback = 0) {
 }
 
 function withApiBase(path) {
-  if (!API_URL) {
+  if (!activeApiBaseUrl) {
     return path;
   }
-  return `${API_URL}${path}`;
+  return `${activeApiBaseUrl}${path}`;
+}
+
+function buildApiUrl(baseUrl, path) {
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  return `${baseUrl}${normalizedPath}`;
+}
+
+async function fetchWithFallback(path, options = {}) {
+  let lastError;
+
+  for (let index = 0; index < API_BASE_URLS.length; index += 1) {
+    const baseUrl = API_BASE_URLS[index];
+    const isLastBase = index === API_BASE_URLS.length - 1;
+
+    try {
+      const response = await fetchWithTimeout(buildApiUrl(baseUrl, path), options);
+
+      if (response.ok || isLastBase || !shouldFallbackStatus(response.status)) {
+        if (response.ok) {
+          activeApiBaseUrl = baseUrl;
+        }
+        return response;
+      }
+    } catch (error) {
+      lastError = error;
+      if (isLastBase) {
+        throw error;
+      }
+    }
+  }
+
+  if (lastError) {
+    throw lastError;
+  }
+
+  return fetchWithTimeout(buildApiUrl(PRIMARY_API_URL, path), options);
 }
 
 function resolveHeatmapUrl(heatmapValue) {
@@ -81,7 +184,7 @@ export async function predictMRI(file) {
   formData.append('file', file);
 
   const response = await safeFetch(() =>
-    fetchWithTimeout(`${API_URL}/api/prediction/mri`, {
+    fetchWithFallback('/api/prediction/mri', {
       method: 'POST',
       body: formData,
     }),
@@ -190,7 +293,7 @@ export async function generateGradCAM(file) {
   formData.append('file', file);
 
   const response = await safeFetch(() =>
-    fetchWithTimeout(`${API_URL}/gradcam`, {
+    fetchWithFallback('/gradcam', {
       method: 'POST',
       body: formData,
     }),
@@ -240,7 +343,7 @@ export async function generateAIReport(file, payload) {
   formData.append('clinical_json', JSON.stringify(payload));
 
   const response = await safeFetch(() =>
-    fetchWithTimeout(`${API_URL}/api/prediction/final-risk`, {
+    fetchWithFallback('/api/prediction/final-risk', {
       method: 'POST',
       body: formData,
     }),

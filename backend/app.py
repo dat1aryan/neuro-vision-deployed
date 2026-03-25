@@ -509,7 +509,11 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
         "https://neuro-vision-deployed.vercel.app",
+        "https://neuro-vision.me",
+        "https://www.neuro-vision.me",
     ],
     allow_credentials=True,
     allow_methods=["*"],
