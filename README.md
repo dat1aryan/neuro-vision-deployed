@@ -16,7 +16,7 @@ It enables users to:
 
 ### 🌐 Frontend (Main Application)
 
-👉 https://neuro-vision-deployed.vercel.app
+👉 https://www.neuro-vision.me/
 
 The frontend provides a complete interactive dashboard where users can:
 
@@ -30,7 +30,7 @@ The frontend provides a complete interactive dashboard where users can:
 
 ### ⚙️ Backend API (FastAPI – Render)
 
-👉 https://neuro-vision-deployed.onrender.com/docs
+👉 https://api.neuro-vision.me/docs
 
 The backend handles:
 
