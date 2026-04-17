@@ -1,5 +1,7 @@
 # 🧠 Neuro Vision – AI Brain Health Analysis Platform
 
+![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)
+
 Neuro Vision is a **multimodal AI platform** for neurological assessment that combines **MRI analysis, explainable AI, and cognitive screening** into a unified system.
 
 It enables users to:
